@@ -1,0 +1,392 @@
+---
+title: "regularized surv"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(lubridate)
+library(MASS)
+library(vcd)
+library(mltools)
+library(installr)
+library(survival)
+library("writexl")
+library(stringr)
+library(pec)
+library(My.stepwise)
+library(devtools)
+library(ggbiplot)
+library(factoextra)
+library(reliaR)
+library(actuar)
+library(fitdistrplus)
+library(survival)
+library(data.table)
+library(goft)
+library(psych)
+require(GGally)
+require(VGAM)
+library(model4you)
+library(eha)
+library(glmnet)
+library(flexsurv)
+```
+
+
+```{r}
+
+
+df<- read_excel('data_surv.xlsx')
+
+L<-log(df$lenght_stay)
+med<-mean(L)
+sd<-sd(L)
+pv1<-round(ks.test(L,pnorm,med,sd)$p.value,2)
+pv1
+
+pllogis=fitdist(df$lenght_stay, "llogis")
+pv2<-round(ks.test(df$lenght_stay, "pllogis",shape = pllogis$estimate[1],scale = pllogis$estimate[2])$p.value,2)
+pv2
+```
+
+```{r}
+ggplot(data=df, aes(x=lenght_stay)) +
+        geom_histogram(aes(y=..density..), breaks=seq(0,60,by=5), 
+                  colour="Black", fill="#2171B5") + 
+        ylim(0,0.06)+
+        xlim(0,60) +
+        xlab("Hospital LOS") +
+        ylab("Density") +
+        theme_minimal() +
+        geom_function(aes(colour=paste("Log-Normal","-",pv1)), fun = dlnorm, 
+                      args = list(med, sd), size=1.2)+
+      geom_function(aes(colour=paste("Log-Logistic","-",pv2)), fun = dllogis, 
+                      args = list(pllogis$estimate[1], pllogis$estimate[2]), size=1.2)+
+        scale_color_manual(values=c("yellow","red2"))+
+        labs(colour="Distribution")
+```
+
+
+
+```{r}
+obj.cox <- coxph(Surv(lenght_stay,state)~.,data=df,iter.max=50)
+summary(obj.cox)
+AIC(obj.cox)
+```
+
+
+
+```{r}
+cox_fit <- survfit(obj.cox)
+km<-survfit(Surv(df$lenght_stay,df$state)~1)
+plot(cox_fit,conf.int=F,col=2,xlab="LOS",ylab="Survival probability")
+lines(km,conf.int=F,col =3)
+legend(x = "topright",          # Position
+       legend = c("Cox", "KM"),  # Legend texts
+       lty = c(1, 1),           # Line types
+       col = c(2, 3),
+       lwd = 2)                 # Line width
+
+```
+
+
+```{r}
+library(emdi)
+
+fit<- step(obj.cox,direction = "both",trace=0,criteria="AICc")
+summary(fit)
+```
+
+```{r}
+fit<-coxph(formula = Surv(lenght_stay, state) ~
+    Hypertension + DM + Hemoglobin + Neutrofils + fibrinogen + 
+    Ddimer + LRA + TP + INR + FA + pH + pCO2 + HCO3 + FiO2 + 
+    FC + Troponine, data = df, iter.max = 50)
+summary(fit)
+AIC(fit)
+
+```
+
+
+
+
+```{r}
+res<-residuals(fit, type = "martingale")
+resid_coxsnell <- df$state-res
+
+fit1 <- fitdistr(resid_coxsnell, "exponential") 
+
+
+# goodness of fit test
+ks.test(resid_coxsnell, "pexp", fit1$estimate) # p-value > 0.05 -> distribution not refused
+```
+
+
+
+
+```{r}
+cox_fit <- survfit(obj.cox)
+km<-survfit(Surv(df$lenght_stay,df$state)~1)
+plot(cox_fit,conf.int=F,col=2)
+lines(km,conf.int=F,col =3)
+legend(x = "topright",          # Position
+       legend = c("Cox", "KM"),  # Legend texts
+       lty = c(1, 1),           # Line types
+       col = c(2, 3),
+       lwd = 2) 
+```
+
+```{r}
+library(survminer)
+ggforest(fit, data = df)
+```
+
+
+
+
+
+
+```{r}
+fit <- survreg(Surv(lenght_stay,state)~., data= df,dist="lognormal")
+#fit <- survreg(Surv(lenght_stay,state)~., data= df,dist="loglogistic")
+summary(fit)
+AIC(fit)
+```
+
+
+```{r}
+
+fit<- step(fit,direction = "both",trace=0,criteria="AICc")
+summary(fit)
+
+AIC(fit)
+
+```
+
+
+```{r}
+fit<- survreg(formula = Surv(lenght_stay, state) ~ DM + Hemoglobin + 
+    Neutrofils + fibrinogen + Ddimer + LRA + INR + pH + pCO2 + 
+    FiO2 + FC , data = df, dist = "lognormal")
+
+
+summary(fit)
+AIC(fit)
+AICc(fit, return.K = FALSE, second.ord = TRUE,
+     nobs = NULL)
+```
+
+```{r}
+
+ln_curve <- function(t){
+  y_hat=mean(fit$linear.predictors)
+  scale=fit$scale
+  S_i = 1-pnorm((log(t)-y_hat)/scale)
+  return(S_i)
+}
+
+
+
+
+```
+
+
+
+
+
+
+```{r}
+
+var_cont<-c("Hemoglobin","Neutrofils","fibrinogen","Ddimer","INR","pH","pCO2","FiO2","FC")
+var_cat<-c("DM","LRA")
+ln_curve_factor <- function(t){
+  x_cont=colMeans(df[,var_cont])
+  x_cat=c(0,1)
+  b0<-fit$coefficients[1]
+  b_cat<-fit$coefficients[c(2,7)]
+  b_cont<-fit$coefficients[-c(1,2,7)]
+  y_hat=as.numeric(b0+b_cat%*%x_cat+b_cont%*%x_cont)
+  scale=fit$scale
+  S_i = 1-pnorm((log(t)-y_hat)/scale)
+  return(S_i)
+}
+
+
+```
+
+
+```{r}
+curve(ln_curve(x), from=0,to=50, col = "blue", lwd=2)
+ln_curve(25)
+```
+
+
+
+
+
+
+```{r}
+my_resid<- (log(df$lenght_stay)-fit$linear.predictors)/fit$scale
+plot(my_resid~fit$linear.predictors)
+my_resid<- data.frame(i=1:50,my_resid=my_resid)
+my_resid
+shapiro.test(my_resid)
+plot(my_resid)
+```
+
+
+```{r}
+
+
+mean(my_resid$my_resid)
+sd<-sd(my_resid$my_resid)
+shapiro.test(my_resid$my_resid)
+pv1<-round(ks.test(my_resid$my_resid,pnorm,0,sd(my_resid$my_resid))$p.value,2)
+pv1
+
+ggplot(data=my_resid, aes(x=my_resid)) +
+        geom_histogram(aes(y=..density..),breaks=seq(-1,1,by=0.25),
+                  colour="Black", fill="#2171B5")+
+        xlab("Residuals") +
+        ylab("Density") +
+        theme_minimal() +
+        geom_function(aes(colour=paste("Normal","-",pv1)), fun = dnorm, 
+                      args = list(0, sd), size=1.2)+
+        scale_color_manual(values=c("red2"))+
+        ylim(0,1.3)+
+        xlim(-1,1) +
+        labs(colour="Distribuição")
+```
+```{r}
+ggplot(data=my_resid, aes(x=i,y=my_resid)) +
+     geom_point(size=2, colour="#2171B5")+
+      theme_minimal()+
+       xlab("") +
+        ylab("residuals") 
+```
+
+
+
+
+```{r}
+fit_ll <- survreg(Surv(lenght_stay,state)~., data= df,dist="loglogistic",maxiter=100)
+
+summary(fit_ll)
+AIC(fit_ll)
+
+```
+```{r}
+fit_ll<- step(fit_ll,direction = "both",trace=0,criteria="AICc")
+summary(fit_ll)
+
+AIC(fit_ll)
+```
+
+
+```{r}
+fit_ll<-survreg(formula = Surv(lenght_stay, state) ~
+    DM +  Hemoglobin + Neutrofils + fibrinogen + Ddimer + 
+    LRA + INR + pH + pCO2 + HCO3 + FiO2 + FC + Troponine, data = df, 
+    dist = "loglogistic", maxiter = 100)
+
+summary(fit_ll)
+AIC(fit_ll)
+
+AICc(fit_ll, return.K = FALSE, second.ord = TRUE,
+     nobs = NULL)
+```
+
+
+
+```{r}
+ll_curve <- function(t){
+  y_hat=mean(fit_ll$linear.predictors)
+  scale=fit_ll$scale
+  S_i = (1+exp((log(t)-y_hat)/scale))^(-1)
+  return(S_i)
+}
+
+
+
+```
+
+
+```{r}
+var_cont_l<-c("Hemoglobin","Neutrofils","fibrinogen","Ddimer","INR","pH","pCO2","HCO3","FiO2","FC","Troponine")
+
+ll_curve_factor <- function(t){
+  x_cont=colMeans(df[,var_cont_l])
+  x_cat=c(0,1)
+  b0<-fit$coefficients[1]
+  b_cat<-fit$coefficients[c(2,7)]
+  b_cont<-fit$coefficients[-c(1,2,7)]
+  y_hat=as.numeric(b0+b_cat%*%x_cat+b_cont%*%x_cont)
+  scale=fit$scale
+  S_i = (1+exp((log(t)-y_hat)/scale))^(-1)
+  return(S_i)
+}
+
+```
+
+
+
+
+
+```{r}
+plot(cox_fit,conf.int=F,col=2, lwd=2)
+lines(km,conf.int=F,col =3, lwd=2)
+curve(ll_curve(x),add=TRUE,col="black", lwd=2)
+curve(ln_curve(x), add = TRUE, col = "blue", lwd=2)
+legend(x = "topright",          # Position
+       legend = c("Cox", "KM","Log-Logistic","Log-Normal"),  # Legend texts
+       lty = c(1, 1,1,1),           # Line types
+       col = c(2, 3,"black","blue"),
+       lwd = 2) 
+
+```
+
+
+
+
+```{r}
+res<-(log(df$lenght_stay)-fit_ll$linear.predictor)/ fit_ll$scale
+plot(res~fit_ll$linear.predictor)
+res<- data.frame(i=1:50,res=res)
+l<-exp(res)
+pllogis=fitdist(res, "logis")
+pllogis
+pv2<-round(ks.test (res, "plogis",location = pllogis$estimate[1],scale = pllogis$estimate[2])$p.value,2)
+
+pv2
+```
+
+```{r}
+
+ggplot(data=res, aes(x=res)) +
+        geom_histogram(aes(y=..density..), breaks=seq(-1,1,by=0.2), 
+                  colour="Black", fill="#2171B5") + 
+        ylim(0,1.75)+
+        xlim(-1,1) +
+        xlab("residuals") +
+        ylab("Density") +
+        theme_minimal() +
+      geom_function(aes(colour=paste("Logistic","-",pv2)), fun = dlogis, 
+                      args = list(pllogis$estimate[1], pllogis$estimate[2]), size=1.2)+
+        scale_color_manual(values=c("red2"))+
+        labs(colour="Distribuição")
+```
+
+
+
+```{r}
+ggplot(data=res, aes(x=i,y=res)) +
+     geom_point(size=2, colour="#2171B5")+
+      theme_minimal()+
+    xlab("") +
+        ylab("residuals") 
+```
+
+
+
+
